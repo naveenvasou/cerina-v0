@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { Plus, MessageSquare, Trash2, LogOut, ChevronLeft, ChevronRight, Menu, PanelLeft } from 'lucide-react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Plus, MessageSquare, Trash2, LogOut, PanelLeft } from 'lucide-react';
+import { apiUrl } from '../config';
 
 interface Session {
     id: string;
@@ -24,7 +24,7 @@ export function SessionSidebar({
     isOpen,
     toggleSidebar
 }: SessionSidebarProps) {
-    const { user, signOut, getToken } = useAuth();
+    const { user, signOut } = useAuth();
     const [sessions, setSessions] = useState<Session[]>([]);
     const [loading, setLoading] = useState(true);
 
@@ -37,10 +37,10 @@ export function SessionSidebar({
         if (!user) return;
         try {
             setLoading(true);
-            const token = await getToken();
+            
             // For now, API doesn't require token, will update later
             // But we should send user_id header temporarily as per my backend implementation
-            const response = await fetch('http://localhost:8000/api/sessions', {
+            const response = await fetch(apiUrl('/api/sessions'), {
                 headers: {
                     'user-id': user.uid // Temporary placeholder auth
                 }
@@ -62,7 +62,7 @@ export function SessionSidebar({
 
         try {
             if (!user) return;
-            await fetch(`http://localhost:8000/api/sessions/${sessionId}`, {
+            await fetch(apiUrl(`/api/sessions/${sessionId}`), {
                 method: 'DELETE',
                 headers: {
                     'user-id': user.uid

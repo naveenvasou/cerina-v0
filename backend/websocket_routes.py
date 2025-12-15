@@ -9,7 +9,7 @@ Delegates to:
 
 from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from backend.graph import graph
+from backend.graph import get_compiled_graph
 from backend.events import EventEmitter, set_emitter, EventType
 from backend.utils.id_generator import generate_workflow_run_id, generate_session_id
 from langgraph.types import Command  # For resuming interrupted graphs
@@ -75,6 +75,36 @@ async def websocket_endpoint(
     # Fallback to ephemeral ID
     if not current_session_id:
         current_session_id = generate_workflow_run_id()
+    
+    # Track running workflow tasks for stop functionality
+    running_task: Optional[asyncio.Task] = None
+    consumer_task: Optional[asyncio.Task] = None
+    current_workflow_run_id: Optional[str] = None  # Track for resume
+    
+    # Check if session has a pending checkpoint (can be resumed)
+    thread_config = {"configurable": {"thread_id": current_session_id}}
+    try:
+        compiled_graph = get_compiled_graph()
+        state = await compiled_graph.aget_state(thread_config)
+        if state and state.next:
+            pending_nodes = list(state.next) if state.next else []
+            
+            # If pending at HITL approval node, don't show Resume button
+            # The approval modal handles that case instead
+            is_hitl_pending = "await_plan_approval" in pending_nodes
+            
+            # Send workflow_status to frontend
+            await websocket.send_json({
+                "type": "workflow_status",
+                "running": False,
+                "canResume": not is_hitl_pending,  # Only resumable if NOT at HITL node
+                "pendingNodes": pending_nodes
+            })
+            print(f"📋 Session {current_session_id} has pending checkpoint at: {state.next}")
+            if is_hitl_pending:
+                print("   (HITL approval pending - handled by approval modal)")
+    except Exception as e:
+        print(f"Could not check checkpoint status: {e}")
     
     try:
         while True:
@@ -148,8 +178,9 @@ async def websocket_endpoint(
                 resume_value = {"decision": decision, "feedback": feedback}
                 
                 async def run_resumed_graph():
+                    compiled_graph = get_compiled_graph()
                     try:
-                        async for event in graph.astream(
+                        async for event in compiled_graph.astream(
                             Command(resume=resume_value),
                             config=thread_config
                         ):
@@ -181,7 +212,7 @@ async def websocket_endpoint(
                         # Check if the graph is truly completed or just interrupted again
                         # (e.g., if user requested revision and planner paused for approval again)
                         try:
-                            state = await graph.aget_state(thread_config)
+                            state = await compiled_graph.aget_state(thread_config)
                             is_done = not bool(state.next)
                         except Exception:
                             # Fallback if aget_state fails
@@ -231,9 +262,11 @@ async def websocket_endpoint(
                             
                             # HITL: Persist pending approval state (handling revision loops)
                             if event.type == EventType.PLAN_PENDING_APPROVAL:
-                                # When decision is "approved", this event is spuriously emitted
-                                # because the node function re-runs on resume. Skip it and continue.
-                                if decision == "approved":
+                                # When resuming after any decision, the node function re-runs and
+                                # emits this event spuriously. We only care about NEW plans.
+                                # For "approved" or "rejected" - skip entirely (no new plan)
+                                # For "revised" - this is the NEW revised plan, so process it
+                                if decision == "approved" or decision == "rejected":
                                     continue  # Skip this spurious event, keep consuming
                                 
                                 # For "revised" - this is a new plan needing approval
@@ -324,10 +357,254 @@ async def websocket_endpoint(
                      await consumer_task
                 continue  # Go back to waiting for next message
             
+            # ============================================================
+            # STOP WORKFLOW: Cancel both running and consumer tasks
+            # ============================================================
+            if message_type == "stop_workflow":
+                print("🛑 Stop workflow requested")
+                
+                # Cancel both tasks
+                if running_task and not running_task.done():
+                    running_task.cancel()
+                    try:
+                        await running_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                if consumer_task and not consumer_task.done():
+                    consumer_task.cancel()
+                    try:
+                        await consumer_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                print("✅ Workflow stopped - state preserved in checkpoint")
+                
+                # Check if stopped at HITL node (approval modal handles that)
+                try:
+                    compiled_graph = get_compiled_graph()
+                    state = await compiled_graph.aget_state(thread_config)
+                    if state and state.next:
+                        pending_nodes = list(state.next)
+                        is_hitl = "await_plan_approval" in pending_nodes
+                        can_resume = not is_hitl
+                    else:
+                        can_resume = True  # Stopped mid-execution, should be resumable
+                except Exception:
+                    can_resume = True  # Default to resumable on error
+                
+                await websocket.send_json({
+                    "type": "workflow_status",
+                    "running": False,
+                    "canResume": can_resume,
+                    "message": "Workflow stopped. You can resume anytime."
+                })
+                continue
+            
+            # ============================================================
+            # RESUME WORKFLOW: Continue from last checkpoint
+            # ============================================================
+            if message_type == "resume_workflow":
+                print("▶️ Resume workflow requested")
+                
+                # Create event emitter for resume
+                emitter = EventEmitter()
+                emitter.initialize(asyncio.get_running_loop())
+                set_emitter(emitter)
+                
+                thread_config = {"configurable": {"thread_id": current_session_id}}
+                
+                # Check if there's a pending checkpoint
+                compiled_graph = get_compiled_graph()
+                try:
+                    state = await compiled_graph.aget_state(thread_config)
+                    if not state or not state.next:
+                        await websocket.send_json({
+                            "type": "workflow_status",
+                            "running": False,
+                            "canResume": False,
+                            "message": "No checkpoint to resume from."
+                        })
+                        continue
+                except Exception as e:
+                    print(f"Error checking state: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Failed to check checkpoint: {str(e)}"
+                    })
+                    continue
+                
+                print(f"📋 Resuming from checkpoint at: {state.next}")
+                
+                # Send running status
+                await websocket.send_json({
+                    "type": "workflow_status",
+                    "running": True,
+                    "canResume": False
+                })
+                
+                # Use tracked workflow_run_id or fallback to message/generate
+                workflow_run_id = current_workflow_run_id or message_data.get("workflow_run_id") or generate_workflow_run_id()
+                
+                async def run_resumed_from_checkpoint():
+                    try:
+                        # Resume with None input - continues from checkpoint
+                        async for event in compiled_graph.astream(None, config=thread_config):
+                            for node_name, state_update in event.items():
+                                if node_name == "router":
+                                    await handle_router(state_update, current_session_id, workflow_run_id, websocket)
+                                elif node_name == "planner":
+                                    await handle_planner(state_update, current_session_id, workflow_run_id)
+                                elif node_name == "draftsman":
+                                    await handle_draftsman(state_update, current_session_id, workflow_run_id)
+                                elif node_name == "critic":
+                                    await handle_critic(state_update, current_session_id, workflow_run_id)
+                                elif node_name == "reviser":
+                                    await handle_reviser(state_update, current_session_id, workflow_run_id)
+                                elif node_name == "synthesizer":
+                                    await handle_synthesizer(state_update, current_session_id, workflow_run_id, websocket)
+                    finally:
+                        # Check if truly completed or interrupted again
+                        try:
+                            final_state = await compiled_graph.aget_state(thread_config)
+                            is_done = not bool(final_state.next)
+                        except Exception:
+                            is_done = True
+                        
+                        if is_done:
+                            await update_workflow_run(workflow_run_id, status="completed")
+                            emitter.emit_done()
+                        # If not done (e.g., hit another HITL interrupt), don't emit done
+                
+                async def stream_resume_events():
+                    """Stream events with full persistence (same as main stream_events)."""
+                    try:
+                        while True:
+                            event = await asyncio.wait_for(emitter.get(), timeout=120)
+                            if event.type == EventType.STATUS and event.content == "__DONE__":
+                                break
+                            
+                            # PERSISTENCE: Save events to database (Bug #5 fix)
+                            if event.type == EventType.AGENT_MEMORY:
+                                await save_agent_memory(
+                                    workflow_run_id=workflow_run_id,
+                                    agent_name=event.agent,
+                                    messages=event.messages or [],
+                                    scratchpad=event.scratchpad or ""
+                                )
+                            
+                            if event.type == EventType.ARTIFACT:
+                                await save_artifact(
+                                    workflow_run_id=workflow_run_id,
+                                    session_id=current_session_id,
+                                    agent_name=event.agent,
+                                    artifact_type=event.artifact_type or "unknown",
+                                    title=event.artifact_title or "Untitled",
+                                    content=event.content
+                                )
+                            
+                            # Chat history persistence (same logic as main stream_events)
+                            should_save_to_history = event.type not in [
+                                EventType.THOUGHT_CHUNK,
+                                EventType.MESSAGE_CHUNK,
+                                EventType.MESSAGE_END,
+                                EventType.AGENT_MEMORY,
+                                EventType.STATUS,
+                                EventType.REFLECTION_STATUS,
+                                EventType.TOOL_CALL
+                            ]
+                            
+                            if should_save_to_history:
+                                item_type = event.type.value
+                                
+                                if event.type == EventType.MESSAGE:
+                                    role = "assistant"
+                                elif event.type in [
+                                    EventType.THOUGHT, EventType.TOOL_RESULT,
+                                    EventType.AGENT_START, EventType.ARTIFACT,
+                                    EventType.CRITIQUE_DOCUMENT, EventType.DRAFT_UPDATED
+                                ]:
+                                    role = "agent"
+                                else:
+                                    role = "system"
+                                
+                                await append_to_chat_history(
+                                    session_id=current_session_id,
+                                    workflow_run_id=workflow_run_id,
+                                    item_type=item_type,
+                                    role=role,
+                                    content=event.content,
+                                    agent_name=event.agent,
+                                    tool_name=event.tool_name,
+                                    tool_args=event.tool_args,
+                                    tool_output=event.tool_output,
+                                    artifact_type=event.artifact_type,
+                                    artifact_title=event.artifact_title,
+                                    iteration=event.iteration,
+                                    version=event.version
+                                )
+                            
+                            # Handle HITL interrupt during resume
+                            if event.type == EventType.PLAN_PENDING_APPROVAL:
+                                await set_hitl_pending(
+                                    workflow_run_id=workflow_run_id,
+                                    pending=True,
+                                    plan_json=event.content
+                                )
+                                await websocket.send_json(event.to_dict())
+                                break
+                            
+                            # Send to frontend (exclude MESSAGE and THOUGHT - they're for persistence only)
+                            should_send_to_websocket = event.type not in [
+                                EventType.MESSAGE,
+                                EventType.THOUGHT
+                            ]
+                            
+                            if should_send_to_websocket:
+                                await websocket.send_json(event.to_dict())
+                            
+                    except asyncio.TimeoutError:
+                        print("Resume stream timeout")
+                    except asyncio.CancelledError:
+                        print("🛑 Resume stream cancelled")
+                    except Exception as e:
+                        print(f"Resume streaming error: {e}")
+                
+                consumer_task = asyncio.create_task(stream_resume_events())
+                await asyncio.sleep(0.1)
+                
+                running_task = asyncio.create_task(run_resumed_from_checkpoint())
+                try:
+                    await running_task
+                finally:
+                    await consumer_task
+                    # Check actual checkpoint state for canResume (Bug #2 fix)
+                    try:
+                        final_state = await compiled_graph.aget_state(thread_config)
+                        if final_state and final_state.next:
+                            pending_nodes = list(final_state.next)
+                            # Don't show Resume if at HITL node (approval modal handles it)
+                            is_hitl = "await_plan_approval" in pending_nodes
+                            can_resume = not is_hitl
+                        else:
+                            can_resume = False
+                    except Exception:
+                        can_resume = False
+                    
+                    await websocket.send_json({
+                        "type": "workflow_status",
+                        "running": False,
+                        "canResume": can_resume
+                    })
+                continue
+            
             # Create workflow run
             workflow_run_id = await create_workflow_run(current_session_id, user_query)
             if not workflow_run_id:
                 workflow_run_id = generate_workflow_run_id()
+            
+            # Track for resume operations
+            current_workflow_run_id = workflow_run_id
             
             # Save user message
             await save_message(current_session_id, "user", user_query, workflow_run_id)
@@ -369,8 +646,9 @@ async def websocket_endpoint(
             
             async def run_graph():
                 nonlocal final_route, reflection_iterations, is_approved
+                compiled_graph = get_compiled_graph()
                 try:
-                    async for event in graph.astream(inputs, config=thread_config):
+                    async for event in compiled_graph.astream(inputs, config=thread_config):
                         for node_name, state_update in event.items():
                             if node_name == "router":
                                 final_route = await handle_router(
@@ -536,19 +814,86 @@ async def websocket_endpoint(
                 
                 except asyncio.TimeoutError:
                     await update_workflow_run(workflow_run_id, status="timeout")
+                except asyncio.CancelledError:
+                    # Workflow was stopped by user
+                    print("🛑 Workflow cancelled by user")
                 except Exception as e:
                     print(f"Event streaming error: {e}")
                     await update_workflow_run(workflow_run_id, status="failed")
             
-            # Run both tasks concurrently
-            await asyncio.gather(run_graph(), stream_events())
+            # Send workflow running status
+            await websocket.send_json({
+                "type": "workflow_status",
+                "running": True,
+                "canResume": False
+            })
+            
+            # Run both tasks concurrently, tracking the graph task
+            consumer_task = asyncio.create_task(stream_events())
+            running_task = asyncio.create_task(run_graph())
+            
+            try:
+                await asyncio.gather(running_task, consumer_task)
+            except asyncio.CancelledError:
+                # Stop was requested
+                pass
+            finally:
+                # Send final status (may be resumable if stopped mid-execution)
+                try:
+                    compiled_graph = get_compiled_graph()
+                    state = await compiled_graph.aget_state(thread_config)
+                    if state and state.next:
+                        pending_nodes = list(state.next)
+                        # Don't show Resume if at HITL node (approval modal handles it)
+                        is_hitl = "await_plan_approval" in pending_nodes
+                        can_resume = not is_hitl
+                    else:
+                        can_resume = False
+                except Exception:
+                    can_resume = False
+                
+                await websocket.send_json({
+                    "type": "workflow_status",
+                    "running": False,
+                    "canResume": can_resume
+                })
     
     except WebSocketDisconnect:
         print("Client disconnected")
+        # Cancel both tasks if any (checkpoint already saved)
+        if running_task and not running_task.done():
+            running_task.cancel()
+            try:
+                await running_task
+            except asyncio.CancelledError:
+                pass
+        if consumer_task and not consumer_task.done():
+            consumer_task.cancel()
+            try:
+                await consumer_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close emitter to stop background threads from emitting stale events
+        from backend.events import get_emitter, clear_emitter
+        current_emitter = get_emitter()
+        if current_emitter:
+            current_emitter.close()
+        clear_emitter()
+        
+        print("✅ Orphaned tasks cancelled - checkpoint preserved")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Also close emitter on error
+        from backend.events import get_emitter, clear_emitter
+        current_emitter = get_emitter()
+        if current_emitter:
+            current_emitter.close()
+        clear_emitter()
+        
         try:
             await websocket.close()
         except:

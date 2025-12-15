@@ -7,7 +7,7 @@ import {
     signInWithEmailAndPassword
 } from 'firebase/auth';
 import { auth } from '../lib/firebase';
-import { Loader2, Mail, Lock, ArrowRight, Github } from 'lucide-react';
+import { Loader2, Mail, Lock, ArrowRight } from 'lucide-react';
 
 export default function LoginPage() {
     const [isLogin, setIsLogin] = useState(true);

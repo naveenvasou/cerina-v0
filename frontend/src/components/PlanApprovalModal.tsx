@@ -1,12 +1,12 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { X, Check, Edit3, XCircle, FileText, Shield, Target, BookOpen } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+
 
 interface PlanApprovalModalProps {
     isOpen: boolean;
     planJson: string;
     userPreview: string;
-    workflowRunId?: string;
+    /* workflowRunId?: string; */
     onApprove: () => void;
     onRevise: (feedback: string) => void;
     onReject: () => void;
@@ -39,7 +39,6 @@ export function PlanApprovalModal({
     isOpen,
     planJson,
     userPreview,
-    workflowRunId,
     onApprove,
     onRevise,
     onReject,

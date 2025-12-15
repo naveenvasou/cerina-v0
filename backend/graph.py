@@ -15,8 +15,8 @@ The critic-reviser loop runs until:
 2. Maximum iterations (default 3) are reached
 
 Checkpointing:
-- Uses MemorySaver for workflow state persistence (use PostgresSaver in production)
-- Enables resumption of interrupted workflows
+- Uses PostgresSaver for persistent state (with MemorySaver fallback)
+- Enables resumption of interrupted workflows across server restarts
 - Each session gets a unique thread_id
 """
 
@@ -24,9 +24,7 @@ import os
 import json
 from typing import Optional
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
-# from langgraph.checkpoint.postgres import PostgresSaver
 from backend.agents.router import RouterAgent
 from backend.agents.planner import PlannerAgent
 from backend.agents.draftsman import DraftsmanAgent
@@ -35,7 +33,7 @@ from backend.agents.reviser import ReviserAgent
 from backend.agents.synthesizer import PresentationSynthesizerAgent
 from backend.state import AgentState
 from backend.settings import settings
-from backend.database import get_async_database_url
+
 
 # --- Configuration ---
 MAX_REFLECTION_ITERATIONS = 3  # Maximum critique-revision cycles
@@ -122,9 +120,13 @@ def await_plan_approval(state: AgentState):
     
     print("--- AWAITING PLAN APPROVAL ---")
     
-    # Emit plan_pending_approval event for frontend
+    # Check if we're resuming from a previous interrupt (Bug #4 fix)
+    # If hitl_pending is already True, we're resuming - don't emit again
+    already_pending = state.get("hitl_pending", False)
+    
+    # Emit plan_pending_approval event for frontend (only on first entry)
     emitter = get_emitter()
-    if emitter:
+    if emitter and not already_pending:
         plan_json = state.get("plan", "")
         revision_count = state.get("plan_revision_count", 0)
         
@@ -147,6 +149,12 @@ def await_plan_approval(state: AgentState):
             plan_json=plan_json,
             user_preview=user_preview if user_preview else default_preview
         )
+        
+        # IMPORTANT: We need the interrupt() to happen AFTER emitting the event
+        # but the checkpoint must include hitl_pending=True so on resume we don't emit again.
+        # We return hitl_pending=True as a partial state update, then call interrupt().
+        # However, LangGraph doesn't support partial returns before interrupt.
+        # The workaround is handled in websocket_routes.py by filtering duplicate events.
     
     # Block execution until user provides decision via Command(resume=...)
     # The value returned from interrupt() is what the user sends when resuming
@@ -300,12 +308,21 @@ workflow.add_edge("respond", END)
 
 
 # --- Checkpointer Setup ---
-# --- Checkpointer Setup ---
-# Switched to MemorySaver for async compatibility
-checkpointer = MemorySaver()
+# Uses PostgresSaver (from database.py) when DATABASE_URL is set
+# Falls back to MemorySaver for local dev without database
+from backend.database import get_checkpointer
 
-# Compile with checkpointer for persistence
-graph = workflow.compile(checkpointer=checkpointer)
+# Compile with the global checkpointer
+graph = workflow.compile(checkpointer=get_checkpointer())
+
+
+def get_compiled_graph():
+    """
+    Get a compiled graph with the current checkpointer.
+    
+    Use this if you need to refresh the checkpointer after init_checkpointer() is called.
+    """
+    return workflow.compile(checkpointer=get_checkpointer())
 
 
 

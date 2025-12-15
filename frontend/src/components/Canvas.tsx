@@ -364,16 +364,7 @@ export function Canvas({
                                                             <ClipboardList className="w-4 h-4" /> Requirements
                                                         </h3>
                                                         <div className="space-y-4">
-                                                            <div>
-                                                                <span className="text-xs font-semibold text-gray-800 block mb-2">Required Fields</span>
-                                                                <div className="flex flex-wrap gap-2">
-                                                                    {parsedPlan.drafting_spec.required_fields?.map((field, i) => (
-                                                                        <span key={i} className="px-2 py-1 bg-gray-100 text-gray-600 text-[11px] rounded border border-gray-200">
-                                                                            {field}
-                                                                        </span>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
+                                                        
                                                             <div>
                                                                 <span className="text-xs font-semibold text-gray-800 block mb-2">Style Rules</span>
                                                                 <ul className="space-y-1.5">
@@ -476,7 +467,7 @@ export function Canvas({
                                                                     {category.replace(/_/g, ' ')}
                                                                 </h4>
                                                                 <ul className="space-y-1.5">
-                                                                    {items?.map((item, idx) => (
+                                                                    {items?.map((item: string, idx: number) => (
                                                                         <li key={idx} className="text-[10px] text-gray-600 leading-tight flex items-start gap-1">
                                                                             <span className="text-gray-400">•</span>
                                                                             {item}

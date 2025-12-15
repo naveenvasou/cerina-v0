@@ -30,7 +30,7 @@ class ReviserAgent:
     
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-2.5-flash-lite",
         temperature: float = 0.4
     ):
         """

@@ -91,6 +91,7 @@ class HITLStatusResponse(BaseModel):
     hitl_pending: bool
     workflow_run_id: Optional[str] = None
     pending_plan_json: Optional[str] = None
+    plan_json: Optional[str] = None  # Alias for frontend compatibility
 
 
 class AgentEventResponse(BaseModel):
@@ -540,7 +541,8 @@ async def get_hitl_status(
         return HITLStatusResponse(
             hitl_pending=True,
             workflow_run_id=pending_run.id,
-            pending_plan_json=pending_run.pending_plan_json
+            pending_plan_json=pending_run.pending_plan_json,
+            plan_json=pending_run.pending_plan_json  # Alias for frontend
         )
     
     return HITLStatusResponse(hitl_pending=False)

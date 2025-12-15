@@ -82,21 +82,36 @@ class EventEmitter:
     def __init__(self):
         self._queue: Optional[asyncio.Queue] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._closed: bool = False  # Flag to stop accepting events
     
     def initialize(self, loop: asyncio.AbstractEventLoop):
         """Initialize with the event loop (call from async context)."""
         self._loop = loop
         self._queue = asyncio.Queue()
+        self._closed = False
+    
+    def close(self):
+        """Mark emitter as closed. Future emit() calls will be no-ops."""
+        self._closed = True
+        self._queue = None
+        self._loop = None
     
     def emit(self, event: AgentEvent):
-        """Emit event if emitter is available."""
+        """Emit event if emitter is available and not closed."""
         
-        print(f"DTO DEBUG: Emitter ID: {id(self)}")
+        # Skip if already closed (prevents stale events from background threads)
+        if self._closed:
+            return
+        
         if self._queue is None or self._loop is None:
             return
-        print("EMITTING EVENT", event.agent)
+        
         # Thread-safe way to put item in queue from sync context
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
+        except RuntimeError:
+            # Loop may be closed
+            pass
     
     async def get(self) -> AgentEvent:
         """Get next event from queue (async)."""

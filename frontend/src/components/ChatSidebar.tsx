@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Check, Send, Paperclip, ChevronDown, ChevronRight, ChevronUp, FileText, Loader2, Brain, Wrench, Terminal, Database, ShieldCheck, XCircle } from 'lucide-react';
+import { Check, Send, Paperclip, ChevronDown, ChevronRight, ChevronUp, FileText, Loader2, Brain, Wrench, Terminal, Database, ShieldCheck, XCircle, Square, Play } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { type Message, type AgentMemory } from '../types';
@@ -19,9 +19,26 @@ interface ChatSidebarProps {
     pendingApproval?: boolean;
     onApprove?: () => void;
     onReject?: () => void;
+    // Workflow control props
+    isWorkflowRunning?: boolean;
+    canResume?: boolean;
+    onStopWorkflow?: () => void;
+    onResumeWorkflow?: () => void;
 }
 
-export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemories = {}, pendingApproval = false, onApprove, onReject }: ChatSidebarProps) {
+export function ChatSidebar({
+    messages,
+    onSendMessage,
+    isConnected,
+    agentMemories = {},
+    pendingApproval = false,
+    onApprove,
+    onReject,
+    isWorkflowRunning = false,
+    canResume = false,
+    onStopWorkflow,
+    onResumeWorkflow
+}: ChatSidebarProps) {
     const [inputValue, setInputValue] = useState("");
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -76,18 +93,40 @@ export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemorie
 
             {/* Floating Input Area */}
             <div className="absolute bottom-4 left-4 right-4 z-20">
+                {/* Resume Banner - shown when workflow can be resumed */}
+                {canResume && !isWorkflowRunning && (
+                    <div className="mb-2 p-3 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl shadow-sm animate-in fade-in slide-in-from-bottom-2">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                                <span className="text-sm text-blue-800 font-medium">
+                                    Workflow paused — ready to resume
+                                </span>
+                            </div>
+                            <button
+                                onClick={onResumeWorkflow}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                            >
+                                <Play className="w-3 h-3" />
+                                Resume
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3">
                     <textarea
                         value={inputValue}
                         onChange={(e) => setInputValue(e.target.value)}
                         onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
+                            if (e.key === 'Enter' && !e.shiftKey && !isWorkflowRunning) {
                                 e.preventDefault();
                                 handleSendMessage();
                             }
                         }}
-                        placeholder="Send message..."
-                        className="w-full min-h-[40px] max-h-[120px] p-2 resize-none bg-transparent border-none focus:ring-0 focus:outline-none text-gray-800 placeholder:text-gray-400 text-sm leading-relaxed"
+                        placeholder={isWorkflowRunning ? "Workflow running..." : "Send message..."}
+                        disabled={isWorkflowRunning}
+                        className="w-full min-h-[40px] max-h-[120px] p-2 resize-none bg-transparent border-none focus:ring-0 focus:outline-none text-gray-800 placeholder:text-gray-400 text-sm leading-relaxed disabled:opacity-50"
                     />
 
                     <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
@@ -96,13 +135,25 @@ export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemorie
                                 <Paperclip className="w-4 h-4" />
                             </button>
                         </div>
-                        <button
-                            onClick={handleSendMessage}
-                            disabled={!inputValue.trim()}
-                            className="p-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                        >
-                            <Send className="w-4 h-4" />
-                        </button>
+
+                        {/* Send/Stop Button */}
+                        {isWorkflowRunning ? (
+                            <button
+                                onClick={onStopWorkflow}
+                                className="p-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+                                title="Stop workflow"
+                            >
+                                <Square className="w-4 h-4 fill-current" />
+                            </button>
+                        ) : (
+                            <button
+                                onClick={handleSendMessage}
+                                disabled={!inputValue.trim()}
+                                className="p-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                                <Send className="w-4 h-4" />
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>

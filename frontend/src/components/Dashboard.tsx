@@ -5,7 +5,8 @@ import { Canvas } from './Canvas';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { type Message, type DraftVersion, type CritiqueDocument, type AgentMemory } from '../types';
 import { useAuth } from '../contexts/AuthContext';
-import { Loader2 } from 'lucide-react';
+import { apiUrl, wsUrl } from '../config';
+
 
 interface DashboardProps {
     currentSessionId?: string | null;
@@ -13,7 +14,7 @@ interface DashboardProps {
 
 export function Dashboard({ currentSessionId }: DashboardProps) {
     const navigate = useNavigate();
-    const { user, getToken } = useAuth();
+    const { user } = useAuth();
     const [messages, setMessages] = useState<Message[]>([
         {
             id: 1,
@@ -58,6 +59,10 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
     // Track current workflow run ID for HITL resume
     const currentWorkflowRunRef = React.useRef<string | null>(null);
 
+    // State for Workflow Stop/Resume
+    const [isWorkflowRunning, setIsWorkflowRunning] = useState(false);
+    const [canResume, setCanResume] = useState(false);
+
     // ==========================================================================
     // HISTORY LOADING: Fetch from /chat-history endpoint on session load
     // This is ONLY called on page load/refresh, NOT during active streaming
@@ -73,10 +78,7 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                 const headers = { 'user-id': user.uid };
 
                 // Single endpoint call - returns unified chat history in display order
-                const res = await fetch(
-                    `http://localhost:8000/api/sessions/${currentSessionId}/chat-history`,
-                    { headers }
-                );
+                const res = await fetch(apiUrl(`/api/sessions/${currentSessionId}/chat-history`), { headers });
 
                 if (!res.ok) {
                     console.error('Failed to fetch chat history:', res.status);
@@ -204,7 +206,7 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                 // === Restore HITL Pending Approval State ===
                 try {
                     const hitlRes = await fetch(
-                        `http://localhost:8000/api/sessions/${currentSessionId}/hitl-status`,
+                        apiUrl(`/api/sessions/${currentSessionId}/hitl-status`),
                         { headers }
                     );
                     if (hitlRes.ok) {
@@ -212,8 +214,9 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                         if (hitlStatus.hitl_pending) {
                             setPendingApproval({
                                 isOpen: true,
+                                planJson: hitlStatus.plan_json || '',  // Bug #3 fix: include plan JSON
                                 workflowRunId: hitlStatus.workflow_run_id,
-                                userPreview: 'Plan ready for review'
+                                userPreview: hitlStatus.user_preview || 'Plan ready for review'
                             });
                         }
                     }
@@ -235,8 +238,7 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
         // If currentSessionId changes, reconnect
 
         // Construct URL
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        let url = `${protocol}//localhost:8000/ws/chat`;
+        let url = wsUrl('/ws/chat');
 
         const params = new URLSearchParams();
         if (currentSessionId) params.append('session_id', currentSessionId);
@@ -620,6 +622,13 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                         workflowRunId: currentWorkflowRunRef.current || undefined
                     });
 
+                } else if (data.type === 'workflow_status') {
+                    // Workflow running/stopped status from backend
+                    setIsWorkflowRunning(data.running ?? false);
+                    setCanResume(data.canResume ?? false);
+                    if (data.message) {
+                        console.log('📊 Workflow status:', data.message);
+                    }
                 }
             } catch (e) {
                 console.error("Error parsing WS message", e);
@@ -721,6 +730,41 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
         }]);
     };
 
+    // ==========================================================================
+    // WORKFLOW CONTROL: Stop and Resume Functions
+    // ==========================================================================
+    const handleStopWorkflow = () => {
+        if (socket && isConnected) {
+            socket.send(JSON.stringify({ type: 'stop_workflow' }));
+            setMessages(prev => [...prev, {
+                id: Date.now(),
+                role: 'system',
+                content: '⏸️ Workflow stopped. You can resume anytime.',
+                agentName: 'System',
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                type: 'log'
+            }]);
+        }
+    };
+
+    const handleResumeWorkflow = () => {
+        if (socket && isConnected) {
+            // Include workflow_run_id for proper event association (Bug #6 fix)
+            socket.send(JSON.stringify({ 
+                type: 'resume_workflow',
+                workflow_run_id: pendingApproval.workflowRunId
+            }));
+            setMessages(prev => [...prev, {
+                id: Date.now(),
+                role: 'system',
+                content: '▶️ Resuming workflow from checkpoint...',
+                agentName: 'System',
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                type: 'log'
+            }]);
+        }
+    };
+
     return (
         <div className="flex h-screen w-full bg-white overflow-hidden font-sans text-gray-900">
             <PanelGroup direction="horizontal">
@@ -733,6 +777,10 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                         pendingApproval={pendingApproval.isOpen}
                         onApprove={handlePlanApprove}
                         onReject={handlePlanReject}
+                        isWorkflowRunning={isWorkflowRunning}
+                        canResume={canResume}
+                        onStopWorkflow={handleStopWorkflow}
+                        onResumeWorkflow={handleResumeWorkflow}
                     />
                 </Panel>
 

@@ -32,7 +32,7 @@ class PlannerAgent:
     3. Drafting - Synthesizes final structured output
     """
     
-    def __init__(self, reasoning_model: str = "gemini-2.5-flash", drafting_model: str = "gemini-2.5-flash"):
+    def __init__(self, reasoning_model: str = "gemini-2.5-flash-lite", drafting_model: str = "gemini-2.5-flash-lite"):
         """
         Initialize the Planner Subgraph.
         

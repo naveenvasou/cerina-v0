@@ -3,11 +3,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from backend.graph import graph
+from backend.graph import get_compiled_graph
 from langchain_core.messages import HumanMessage
 from backend.websocket_routes import router as websocket_router
 from backend.api.sessions import router as sessions_router
-from backend.database import create_tables
+from backend.database import create_tables, init_checkpointer, close_checkpointer
 from backend.settings import settings
 
 
@@ -22,9 +22,13 @@ async def lifespan(app: FastAPI):
     else:
         print("⚠️ DATABASE_URL not set - skipping database initialization")
     
+    # Initialize checkpointer (PostgresSaver or MemorySaver fallback)
+    await init_checkpointer()
+    
     yield
     
-    # Shutdown: cleanup if needed
+    # Shutdown: cleanup checkpointer connection
+    await close_checkpointer()
     print("👋 Shutting down...")
 
 
@@ -62,7 +66,8 @@ async def chat_endpoint(request: ChatRequest):
         # mapping simple request to state
         inputs = {"user_query": request.message, "plan": None, "draft": None}
         
-        final_state = await graph.ainvoke(inputs)
+        compiled_graph = get_compiled_graph()
+        final_state = await compiled_graph.ainvoke(inputs)
         
         return {
             "status": "success", 

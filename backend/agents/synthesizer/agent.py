@@ -70,8 +70,8 @@ class PresentationSynthesizerAgent:
     
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",
-        temperature: float = 0.2
+        model: str = "gemini-2.5-flash-lite",
+        temperature: float = 0.6
     ):
         """
         Initialize the Presentation Synthesizer.
