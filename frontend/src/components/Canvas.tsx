@@ -1,6 +1,6 @@
 
 import { useState, useMemo } from 'react';
-import { FileText, MoreHorizontal, Search, BrainCircuit, History, ChevronDown, Activity, ClipboardList, ShieldAlert, BookOpen, Stethoscope, AlertTriangle, Eye, Ruler, PenTool, CheckCircle } from 'lucide-react';
+import { FileText, MoreHorizontal, Search, BrainCircuit, History, ChevronDown, Activity, ClipboardList, ShieldAlert, BookOpen, AlertTriangle, Eye, Ruler, CheckCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { clsx } from 'clsx';

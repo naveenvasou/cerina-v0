@@ -79,9 +79,18 @@ class WorkflowRunResponse(BaseModel):
     final_route: Optional[str]
     reflection_iterations: int
     is_approved: bool
+    hitl_pending: bool = False
+    pending_plan_json: Optional[str] = None
     
     class Config:
         from_attributes = True
+
+
+class HITLStatusResponse(BaseModel):
+    """Response for HITL status check."""
+    hitl_pending: bool
+    workflow_run_id: Optional[str] = None
+    pending_plan_json: Optional[str] = None
 
 
 class AgentEventResponse(BaseModel):
@@ -494,3 +503,44 @@ async def get_chat_history(
         ))
     
     return response
+
+
+@router.get("/{session_id}/hitl-status", response_model=HITLStatusResponse)
+async def get_hitl_status(
+    session_id: str,
+    db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Check if there's a pending HITL approval for this session.
+    
+    Returns the HITL status along with the workflow_run_id and plan JSON
+    if approval is pending. Used to restore approval UI state on page reload.
+    """
+    # First verify session belongs to user
+    result = await db.execute(
+        select(Session)
+        .where(Session.id == session_id)
+        .where(Session.user_id == user_id)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Find any workflow run with hitl_pending = True
+    result = await db.execute(
+        select(WorkflowRun)
+        .where(WorkflowRun.session_id == session_id)
+        .where(WorkflowRun.hitl_pending == True)
+        .order_by(WorkflowRun.started_at.desc())
+        .limit(1)
+    )
+    pending_run = result.scalar_one_or_none()
+    
+    if pending_run:
+        return HITLStatusResponse(
+            hitl_pending=True,
+            workflow_run_id=pending_run.id,
+            pending_plan_json=pending_run.pending_plan_json
+        )
+    
+    return HITLStatusResponse(hitl_pending=False)

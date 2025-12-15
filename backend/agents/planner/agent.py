@@ -16,7 +16,10 @@ from backend.events import get_emitter
 
 from backend.agents.planner.schemas import PlanOutput
 from backend.agents.planner.state import PlannerState
-from backend.agents.planner.prompts import REASONING_SYSTEM_PROMPT, DRAFTING_SYSTEM_PROMPT
+from backend.agents.planner.prompts import (
+    REASONING_SYSTEM_PROMPT, DRAFTING_SYSTEM_PROMPT, 
+    REVISION_REASONING_PROMPT, REVISION_DRAFTING_PROMPT
+)
 
 
 class PlannerAgent:
@@ -127,12 +130,19 @@ class PlannerAgent:
         Reasoning node - Analyzes the request and decides on tool calls.
         
         Uses streaming to emit thought chunks in real-time.
+        In revision mode, uses REVISION_REASONING_PROMPT to produce change instructions.
         """
         messages = state["messages"]
         iteration = state.get("iteration_count", 0)
+        is_revision = state.get("is_revision", False)
         
-        # ALWAYS prepend system prompt on every LLM invocation
-        system_msg = SystemMessage(content=REASONING_SYSTEM_PROMPT)
+        # Choose system prompt based on mode
+        if is_revision:
+            system_prompt = REVISION_REASONING_PROMPT
+        else:
+            system_prompt = REASONING_SYSTEM_PROMPT
+        
+        system_msg = SystemMessage(content=system_prompt)
         messages_to_send = [system_msg] + list(messages)
         
         # Stream the reasoning LLM response
@@ -336,16 +346,79 @@ class PlannerAgent:
         Drafting node - Synthesizes all gathered information into the final plan.
         
         Uses structured output to guarantee the PlanOutput schema.
+        In revision mode, uses a different prompt to preserve the reasoning node's revisions.
         """
-        self._emit("status", content="Synthesizing final clinical plan...")
+        is_revision = state.get("is_revision", False)
+        
+        if is_revision:
+            pass
+            #self._emit("status", content="Extracting revised plan...")
+        else:
+            self._emit("status", content="Synthesizing final clinical plan...")
         
         messages = state["messages"]
         scratchpad = state.get("internal_scratchpad", "")
+        previous_plan = state.get("previous_plan", "")
         
-        # Build the drafting prompt
-        drafting_messages = [
-            SystemMessage(content=DRAFTING_SYSTEM_PROMPT),
-            HumanMessage(content=f"""Review the following conversation history and synthesize the final clinical plan.
+        # Choose prompt based on revision mode
+        if is_revision:
+            # REVISION MODE: Apply change instructions to the previous plan
+            self._emit("status", content="Applying revisions to plan...")
+            system_prompt = REVISION_DRAFTING_PROMPT
+            
+            # Parse previous plan to extract specific items
+            try:
+                import json
+                prev_plan_dict = json.loads(previous_plan) if previous_plan else {}
+                evidence_anchors = prev_plan_dict.get("evidence_anchors", [])
+                evidence_count = len(evidence_anchors)
+                # Create explicit list of existing anchors
+                existing_anchors_str = "\n".join([
+                    f"   - {a.get('source', 'Unknown')}: {a.get('note', '')[:50]}..."
+                    for a in evidence_anchors
+                ])
+            except:
+                evidence_count = 0
+                existing_anchors_str = "(none)"
+            
+            # Get the last AIMessage which contains the change instructions
+            change_instructions = ""
+            for msg in reversed(messages):
+                if type(msg).__name__ == "AIMessage" and not getattr(msg, 'tool_calls', None):
+                    change_instructions = self._extract_text_content(msg.content)
+                    break
+            
+            human_content = f"""YOU MUST APPLY THE CHANGES BELOW. DO NOT JUST COPY THE PREVIOUS PLAN.
+
+## CHANGE INSTRUCTIONS (from reasoning node):
+{change_instructions}
+
+---
+
+## CURRENT EVIDENCE ANCHORS IN PREVIOUS PLAN ({evidence_count} items):
+{existing_anchors_str}
+
+## IF THE INSTRUCTIONS SAY "ADD EVIDENCE ANCHOR":
+Your output MUST have {evidence_count + 1} evidence anchors:
+- All {evidence_count} existing ones listed above
+- PLUS the new one from the change instructions
+
+---
+
+## PREVIOUS PLAN (base for your revisions):
+```json
+{previous_plan}
+```
+
+## YOUR TASK:
+1. Read the CHANGE INSTRUCTIONS carefully
+2. Apply EACH change to the previous plan
+3. Your output must reflect the changes
+4. If adding an evidence anchor, your output must have {evidence_count + 1} anchors"""
+        else:
+            # FRESH MODE: Synthesize from scratch
+            system_prompt = DRAFTING_SYSTEM_PROMPT
+            human_content = f"""Review the following conversation history and synthesize the final clinical plan.
 
             ## Reasoning Summary:
             {scratchpad}
@@ -353,8 +426,12 @@ class PlannerAgent:
             ## Full Conversation:
             {self._format_messages_for_drafting(messages)}
 
-            Now produce the final structured clinical plan specification.""")
-            ]
+            Now produce the final structured clinical plan specification."""
+        
+        drafting_messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_content)
+        ]
         
         # Call the drafting LLM with structured output
         try:
@@ -481,21 +558,46 @@ class PlannerAgent:
         """
         user_query = state.get('user_query', '')
         
+        # HITL revision context
+        hitl_feedback = state.get('hitl_feedback', '')
+        revision_count = state.get('plan_revision_count', 0)
+        previous_plan = state.get('plan', '')
+        previous_scratchpad = state.get('planner_scratchpad', '')
+        
+        # Build the initial message content based on mode
+        if revision_count > 0 and previous_plan:
+            # REVISION MODE: Rich context with previous plan + feedback
+            content = self._build_revision_prompt(
+                user_query, previous_plan, hitl_feedback, 
+                revision_count, previous_scratchpad
+            )
+            agent_start_msg = f"Revising clinical plan (revision #{revision_count})..."
+        else:
+            # FRESH MODE: Original query only
+            content = user_query
+            agent_start_msg = "Starting clinical planning analysis..."
+        
         # Emit agent_start event
-        self._emit("agent_start", content="Starting clinical planning analysis...")
+        self._emit("agent_start", content=agent_start_msg)
         
         # Emit start status
-        self._emit("status", content="Planning...")
+        self._emit("status", content="Planning..." if revision_count == 0 else f"Revising plan...")
         
         # Initialize the subgraph state
+        # For revisions, seed the scratchpad with previous context
+        initial_scratchpad = previous_scratchpad if revision_count > 0 else ""
+        is_revision_mode = revision_count > 0 and bool(previous_plan)
+        
         initial_state: PlannerState = {
-            "messages": [HumanMessage(content=user_query)],
-            "internal_scratchpad": "",
+            "messages": [HumanMessage(content=content)],
+            "internal_scratchpad": initial_scratchpad,
             "final_plan_output": None,
-            "iteration_count": 0
+            "iteration_count": 0,
+            "is_revision": is_revision_mode,
+            "previous_plan": previous_plan if is_revision_mode else None
         }
         
-        # Run the subgraph
+        # Run the subgraph (planner decides if tools are needed)
         final_state = self.graph.invoke(initial_state)
         
         # Extract the final plan
@@ -518,6 +620,55 @@ class PlannerAgent:
             "planner_scratchpad": final_state.get("internal_scratchpad", ""),
             "planner_trace": []  # Trace is streamed via events
         }
+    
+    def _build_revision_prompt(self, query: str, plan: str, feedback: str, 
+                               count: int, scratchpad: str) -> str:
+        """
+        Build a revision prompt that asks for CHANGE INSTRUCTIONS, not the final plan.
+        
+        The reasoning node should analyze the feedback and produce instructions for the drafting node.
+        """
+        return f"""[PLAN REVISION #{count}]
+
+## Original User Request
+{query}
+
+## Current Plan (what needs to be revised)
+```json
+{plan}
+```
+
+## Previous Reasoning & Tool Outputs
+{scratchpad if scratchpad else "(No previous reasoning available)"}
+
+## User's Requested Changes
+{feedback}
+
+## YOUR TASK - PRODUCE CHANGE INSTRUCTIONS
+
+Analyze the user's feedback and determine what changes are needed.
+
+1. If the user's feedback requires NEW information (e.g., "add more evidence"):
+   - Call the appropriate tool to gather that information
+   - Include the new information in your change instructions
+
+2. If the feedback is structural (e.g., "add more steps"):
+   - No tools needed
+   - Just describe what needs to change
+
+## OUTPUT FORMAT
+Provide clear CHANGE INSTRUCTIONS for the drafting node:
+
+```
+CHANGE INSTRUCTIONS:
+1. [field_name]: [what to add/modify/remove]
+2. [field_name]: [what to add/modify/remove]
+...
+```
+
+⚠️ DO NOT output the final revised plan JSON - that's the drafting node's job.
+Just describe the changes that need to be made.
+"""
     
     async def astream(self, state: dict):
         """

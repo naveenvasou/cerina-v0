@@ -75,7 +75,9 @@ async def update_workflow_run(
     status: str = "completed",
     final_route: Optional[str] = None,
     reflection_iterations: int = 0,
-    is_approved: bool = False
+    is_approved: bool = False,
+    hitl_pending: Optional[bool] = None,
+    pending_plan_json: Optional[str] = None
 ):
     """Update workflow run status and metadata."""
     if not workflow_run_id or not async_session_maker:
@@ -93,10 +95,41 @@ async def update_workflow_run(
                     run.final_route = final_route
                 run.reflection_iterations = reflection_iterations
                 run.is_approved = is_approved
+                if hitl_pending is not None:
+                    run.hitl_pending = hitl_pending
+                if pending_plan_json is not None:
+                    run.pending_plan_json = pending_plan_json
                 db.add(run)
                 await db.commit()
     except Exception as e:
         print(f"Failed to update workflow run: {e}")
+
+
+async def set_hitl_pending(
+    workflow_run_id: str,
+    pending: bool,
+    plan_json: Optional[str] = None
+):
+    """Set HITL pending approval state for a workflow run."""
+    if not workflow_run_id or not async_session_maker:
+        return
+    try:
+        async with async_session_maker() as db:
+            result = await db.execute(
+                select(WorkflowRun).where(WorkflowRun.id == workflow_run_id)
+            )
+            run = result.scalar_one_or_none()
+            if run:
+                run.hitl_pending = pending
+                if plan_json is not None:
+                    run.pending_plan_json = plan_json
+                elif not pending:
+                    run.pending_plan_json = None  # Clear when no longer pending
+                run.status = "awaiting_approval" if pending else run.status
+                db.add(run)
+                await db.commit()
+    except Exception as e:
+        print(f"Failed to set HITL pending: {e}")
 
 
 async def save_agent_event(

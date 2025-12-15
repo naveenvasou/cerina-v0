@@ -89,13 +89,12 @@ class EventEmitter:
         self._queue = asyncio.Queue()
     
     def emit(self, event: AgentEvent):
-        """
-        Emit an event (can be called from sync context).
-        Thread-safe push to async queue.
-        """
+        """Emit event if emitter is available."""
+        
+        print(f"DTO DEBUG: Emitter ID: {id(self)}")
         if self._queue is None or self._loop is None:
             return
-        
+        print("EMITTING EVENT", event.agent)
         # Thread-safe way to put item in queue from sync context
         self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
     
@@ -170,6 +169,7 @@ class EventEmitter:
     
     def emit_agent_start(self, agent: str, content: str):
         """Emit agent_start event when an agent begins execution."""
+        print("EMITTING AGENT START EVENT :", agent, content)
         self.emit(AgentEvent(type=EventType.AGENT_START, agent=agent, content=content))
     
     def emit_agent_memory(self, agent: str, messages: list, scratchpad: str = ""):
@@ -226,16 +226,50 @@ class EventEmitter:
 
 
 # Global emitter instance (will be initialized per request)
-# We use a context variable approach for thread safety
+# We use a context variable approach for thread safety, with a thread-safe 
+# global fallback for cases where contextvars don't propagate (e.g., asyncio.to_thread)
 import contextvars
+import threading
+
 _current_emitter: contextvars.ContextVar[Optional[EventEmitter]] = contextvars.ContextVar('emitter', default=None)
+
+# Thread-safe global fallback for when context vars don't propagate
+_global_emitter: Optional[EventEmitter] = None
+_emitter_lock = threading.Lock()
 
 
 def get_emitter() -> Optional[EventEmitter]:
-    """Get the current request's emitter."""
-    return _current_emitter.get()
+    """Get the current request's emitter.
+    
+    First tries to get from context variable, then falls back to global reference.
+    This handles cases where contextvars don't propagate to threads properly.
+    """
+    # Try context variable first (preferred)
+    emitter = _current_emitter.get()
+    if emitter is not None:
+        return emitter
+    
+    # Fallback to global reference (for thread scenarios)
+    global _global_emitter
+    with _emitter_lock:
+        return _global_emitter
 
 
 def set_emitter(emitter: EventEmitter):
-    """Set the current request's emitter."""
+    """Set the current request's emitter.
+    
+    Sets both the context variable and the global fallback.
+    """
+    global _global_emitter
     _current_emitter.set(emitter)
+    # Also set global fallback for thread scenarios
+    with _emitter_lock:
+        _global_emitter = emitter
+
+
+def clear_emitter():
+    """Clear the emitter references (call at end of request)."""
+    global _global_emitter
+    _current_emitter.set(None)
+    with _emitter_lock:
+        _global_emitter = None

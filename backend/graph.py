@@ -64,41 +64,45 @@ def call_planner(state: AgentState):
     return planner.invoke(state)
 
 
-def call_draftsman(state: AgentState):
+async def call_draftsman(state: AgentState):
     """Drafts the CBT exercise based on the plan."""
     print("--- CALLING DRAFTSMAN ---")
-    result = draftsman.invoke(state)
+    import asyncio
+    result = await asyncio.to_thread(draftsman.invoke, state)
     # Initialize max_iterations if not set
     if "max_iterations" not in result:
         result["max_iterations"] = MAX_REFLECTION_ITERATIONS
     return result
 
 
-def call_critic(state: AgentState):
+async def call_critic(state: AgentState):
     """
     Evaluates the current draft with 3 specialized critics.
     Returns critique_document, critique_approved, critique_data.
     """
     print(f"--- CALLING CRITIC (Iteration {state.get('reflection_iteration', 1)}) ---")
-    return critic.invoke(state)
+    import asyncio
+    return await asyncio.to_thread(critic.invoke, state)
 
 
-def call_reviser(state: AgentState):
+async def call_reviser(state: AgentState):
     """
     Revises the draft based on critique feedback.
     Updates current_draft and increments reflection_iteration.
     """
     print(f"--- CALLING REVISER (Iteration {state.get('reflection_iteration', 1)}) ---")
-    return reviser.invoke(state)
+    import asyncio
+    return await asyncio.to_thread(reviser.invoke, state)
 
 
-def call_synthesizer(state: AgentState):
+async def call_synthesizer(state: AgentState):
     """
     Final formatting pass for approved draft.
     Produces the final_presentation.
     """
     print("--- CALLING SYNTHESIZER ---")
-    return synthesizer.invoke(state)
+    import asyncio
+    return await asyncio.to_thread(synthesizer.invoke, state)
 
 
 def respond(state: AgentState):
@@ -122,18 +126,26 @@ def await_plan_approval(state: AgentState):
     emitter = get_emitter()
     if emitter:
         plan_json = state.get("plan", "")
+        revision_count = state.get("plan_revision_count", 0)
+        
         # Try to extract user_preview from plan JSON
         user_preview = ""
         try:
             plan_data = json.loads(plan_json) if isinstance(plan_json, str) else plan_json
-            user_preview = plan_data.get("user_preview", "Your clinical exercise plan is ready for review.")
+            user_preview = plan_data.get("user_preview", "")
         except (json.JSONDecodeError, AttributeError):
-            user_preview = "Your clinical exercise plan is ready for review."
+            user_preview = ""
+        
+        # Customize message based on whether this is a revision
+        if revision_count > 0:
+            default_preview = f"Revised plan (version {revision_count + 1}) is ready for review."
+        else:
+            default_preview = "Your clinical exercise plan is ready for review."
         
         emitter.emit_plan_pending_approval(
             agent="planner",
             plan_json=plan_json,
-            user_preview=user_preview
+            user_preview=user_preview if user_preview else default_preview
         )
     
     # Block execution until user provides decision via Command(resume=...)

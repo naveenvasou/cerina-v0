@@ -57,6 +57,10 @@ class WorkflowRun(SQLModel, table=True):
     final_route: Optional[str] = Field(default=None)  # conversation, planner, draftsman
     reflection_iterations: int = Field(default=0)
     is_approved: bool = Field(default=False)
+    
+    # HITL (Human-in-the-Loop) state
+    hitl_pending: bool = Field(default=False)  # True when waiting for user approval
+    pending_plan_json: Optional[str] = Field(default=None)  # The plan awaiting approval
 
 
 class Message(SQLModel, table=True):

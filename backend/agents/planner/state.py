@@ -23,3 +23,11 @@ class PlannerState(TypedDict):
     
     # Iteration tracking for safety limits
     iteration_count: int
+    
+    # HITL: Track if we're in revision mode
+    is_revision: Optional[bool]
+    
+    # HITL: Store previous plan JSON for revision mode
+    previous_plan: Optional[str]
+
+

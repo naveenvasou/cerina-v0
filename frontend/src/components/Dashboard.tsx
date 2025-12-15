@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChatSidebar } from './ChatSidebar';
 import { Canvas } from './Canvas';
-import { PlanApprovalModal } from './PlanApprovalModal';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { type Message, type DraftVersion, type CritiqueDocument, type AgentMemory } from '../types';
 import { useAuth } from '../contexts/AuthContext';
@@ -201,6 +200,26 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
 
                 // Mark this session as loaded
                 loadedSessionRef.current = currentSessionId;
+
+                // === Restore HITL Pending Approval State ===
+                try {
+                    const hitlRes = await fetch(
+                        `http://localhost:8000/api/sessions/${currentSessionId}/hitl-status`,
+                        { headers }
+                    );
+                    if (hitlRes.ok) {
+                        const hitlStatus = await hitlRes.json();
+                        if (hitlStatus.hitl_pending) {
+                            setPendingApproval({
+                                isOpen: true,
+                                workflowRunId: hitlStatus.workflow_run_id,
+                                userPreview: 'Plan ready for review'
+                            });
+                        }
+                    }
+                } catch (hitlErr) {
+                    console.error("Failed to check HITL status:", hitlErr);
+                }
 
             } catch (err) {
                 console.error("Failed to load session history:", err);
@@ -600,15 +619,7 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                         userPreview: data.artifact_title || '',
                         workflowRunId: currentWorkflowRunRef.current || undefined
                     });
-                    // Add a message to indicate approval is pending
-                    setMessages(prev => [...prev, {
-                        id: Date.now(),
-                        role: 'system',
-                        content: 'Plan ready for review. Please approve, request changes, or reject.',
-                        agentName: 'System',
-                        timestamp: timestamp,
-                        type: 'log'
-                    }]);
+
                 }
             } catch (e) {
                 console.error("Error parsing WS message", e);
@@ -629,6 +640,26 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
 
     const sendMessage = async (text: string) => {
         if (socket && isConnected) {
+            // Check if we're in pending approval mode
+            // If so, treat this message as a revision request
+            if (pendingApproval.isOpen) {
+                // Close the approval state and send as revision
+                setPendingApproval(prev => ({ ...prev, isOpen: false }));
+
+                // Add user message to chat
+                setMessages(prev => [...prev, {
+                    id: Date.now(),
+                    role: 'user',
+                    content: text,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }]);
+
+                // Send as plan revision
+                sendPlanDecision('revised', text);
+                return;
+            }
+
+            // Normal message flow
             setMessages(prev => [...prev, {
                 id: Date.now(),
                 role: 'user',
@@ -677,18 +708,6 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
         }]);
     };
 
-    const handlePlanRevise = (feedback: string) => {
-        sendPlanDecision('revised', feedback);
-        setPendingApproval(prev => ({ ...prev, isOpen: false }));
-        setMessages(prev => [...prev, {
-            id: Date.now(),
-            role: 'user',
-            content: `Revision requested: ${feedback}`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            type: 'text'
-        }]);
-    };
-
     const handlePlanReject = () => {
         sendPlanDecision('rejected');
         setPendingApproval(prev => ({ ...prev, isOpen: false }));
@@ -711,6 +730,9 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                         onSendMessage={sendMessage}
                         isConnected={isConnected}
                         agentMemories={agentMemories}
+                        pendingApproval={pendingApproval.isOpen}
+                        onApprove={handlePlanApprove}
+                        onReject={handlePlanReject}
                     />
                 </Panel>
 
@@ -746,18 +768,6 @@ export function Dashboard({ currentSessionId }: DashboardProps) {
                 </Panel>
 
             </PanelGroup>
-
-            {/* Human-in-the-Loop: Plan Approval Modal */}
-            <PlanApprovalModal
-                isOpen={pendingApproval.isOpen}
-                planJson={pendingApproval.planJson}
-                userPreview={pendingApproval.userPreview}
-                workflowRunId={pendingApproval.workflowRunId}
-                onApprove={handlePlanApprove}
-                onRevise={handlePlanRevise}
-                onReject={handlePlanReject}
-                onClose={() => setPendingApproval(prev => ({ ...prev, isOpen: false }))}
-            />
         </div>
     );
 }

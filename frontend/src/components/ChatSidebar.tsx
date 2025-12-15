@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Check, Send, Paperclip, ChevronDown, ChevronRight, ChevronUp, FileText, Loader2, Brain, Wrench, Terminal, Database, ShieldCheck } from 'lucide-react';
+import { Check, Send, Paperclip, ChevronDown, ChevronRight, ChevronUp, FileText, Loader2, Brain, Wrench, Terminal, Database, ShieldCheck, XCircle } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { type Message, type AgentMemory } from '../types';
@@ -15,9 +15,13 @@ interface ChatSidebarProps {
     onSendMessage: (text: string) => void;
     isConnected: boolean;
     agentMemories?: Record<string, AgentMemory>;
+    // HITL approval props
+    pendingApproval?: boolean;
+    onApprove?: () => void;
+    onReject?: () => void;
 }
 
-export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemories = {} }: ChatSidebarProps) {
+export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemories = {}, pendingApproval = false, onApprove, onReject }: ChatSidebarProps) {
     const [inputValue, setInputValue] = useState("");
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -62,6 +66,9 @@ export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemorie
                         message={msg}
                         onOpenMemory={handleOpenMemory}
                         hasMemory={msg.agentName ? !!agentMemories[msg.agentName] : false}
+                        pendingApproval={pendingApproval}
+                        onApprove={onApprove}
+                        onReject={onReject}
                     />
                 ))}
                 <div ref={messagesEndRef} />
@@ -111,11 +118,20 @@ export function ChatSidebar({ messages, onSendMessage, isConnected, agentMemorie
 }
 
 // --- Message Item Router ---
-function MessageItem({ message, onOpenMemory, hasMemory }: { message: Message; onOpenMemory?: (agentName?: string) => void; hasMemory?: boolean }) {
+interface MessageItemProps {
+    message: Message;
+    onOpenMemory?: (agentName?: string) => void;
+    hasMemory?: boolean;
+    pendingApproval?: boolean;
+    onApprove?: () => void;
+    onReject?: () => void;
+}
+
+function MessageItem({ message, onOpenMemory, hasMemory, pendingApproval, onApprove, onReject }: MessageItemProps) {
     if (message.type === 'agent_start') return <AgentStartItem message={message} onOpenMemory={onOpenMemory} hasMemory={hasMemory} />;
     if (message.type === 'thought') return <ThoughtItem message={message} />;
     if (message.type === 'tool') return <ToolCard message={message} />;
-    if (message.type === 'artifact') return <ArtifactItem message={message} />;
+    if (message.type === 'artifact') return <ArtifactItem message={message} pendingApproval={pendingApproval} onApprove={onApprove} onReject={onReject} />;
     if (message.type === 'critique') return <CritiqueItem message={message} />;
     if (message.type === 'log') return <LogItem message={message} />;
     if (message.type === 'action') return <ActionItem message={message} />;
@@ -340,16 +356,26 @@ function ToolCard({ message }: { message: Message }) {
 }
 
 // --- Artifact (Plan, Draft, Revision, etc.) ---
-function ArtifactItem({ message }: { message: Message }) {
+interface ArtifactItemProps {
+    message: Message;
+    pendingApproval?: boolean;
+    onApprove?: () => void;
+    onReject?: () => void;
+}
+
+function ArtifactItem({ message, pendingApproval, onApprove, onReject }: ArtifactItemProps) {
     const [expanded, setExpanded] = useState(false);
     const isPlan = message.artifactType === 'clinical_protocol';
     const isRevision = message.artifactType === 'draft_revision';
     const isFinal = message.artifactType === 'cbt_exercise';
 
+    // Show approval UI only for plan artifacts when approval is pending
+    const showApprovalUI = isPlan && pendingApproval;
+
     // Determine display properties based on artifact type
     const getDisplayProps = () => {
         if (isPlan) {
-            return { label: 'Plan', icon: <Wrench className="w-4 h-4 text-blue-500" />, borderColor: 'border-blue-200' };
+            return { label: 'Plan', icon: <Wrench className="w-4 h-4 text-blue-500" />, borderColor: showApprovalUI ? 'border-emerald-300' : 'border-blue-200' };
         }
         if (isRevision) {
             return { label: 'Revision', icon: <FileText className="w-4 h-4 text-purple-500" />, borderColor: 'border-purple-200' };
@@ -364,28 +390,69 @@ function ArtifactItem({ message }: { message: Message }) {
 
     return (
         <div className="py-2 animate-in fade-in duration-200">
-            <div
-                onClick={() => setExpanded(!expanded)}
-                className={`flex items-center gap-3 p-3 border ${borderColor} rounded-lg cursor-pointer hover:border-gray-300 transition-colors`}
-            >
-                <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center">
-                    {icon}
-                </div>
-                <div className="flex-1 min-w-0">
-                    <div className="text-[10px] text-gray-400 uppercase tracking-wide font-medium">
-                        {label}
+            <div className={cn(
+                "border rounded-xl transition-colors overflow-hidden",
+                borderColor,
+                showApprovalUI && "bg-gradient-to-br from-emerald-50/30 to-teal-50/30 shadow-sm"
+            )}>
+                {/* Main artifact header */}
+                <div
+                    onClick={() => setExpanded(!expanded)}
+                    className="flex items-center gap-3 p-3 cursor-pointer hover:bg-gray-50/50 transition-colors"
+                >
+                    <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center">
+                        {icon}
                     </div>
-                    <div className="text-sm text-gray-700 font-medium truncate">
-                        {message.artifactTitle || 'Artifact'}
+                    <div className="flex-1 min-w-0">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wide font-medium">
+                            {label}
+                        </div>
+                        <div className="text-sm text-gray-700 font-medium truncate">
+                            {message.artifactTitle || 'Artifact'}
+                        </div>
                     </div>
+                    {expanded ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
                 </div>
-                {expanded ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+
+                {/* Expanded content */}
+                {expanded && (
+                    <pre className="mx-3 mb-3 p-3 bg-gray-50 rounded-lg text-xs text-gray-700 font-mono overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap border border-gray-100">
+                        {message.content}
+                    </pre>
+                )}
+
+                {/* HITL Approval UI - only for plan artifacts when pending */}
+                {showApprovalUI && (
+                    <div className="border-t border-emerald-200 px-3 py-3 bg-gradient-to-r from-emerald-50/50 to-teal-50/50">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs text-gray-600 flex-1">
+                                <span className="font-medium text-emerald-700">Review required</span> — Approve or type a message to request changes
+                            </p>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); onReject?.(); }}
+                                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium 
+                                             text-red-600 bg-white border border-red-200 
+                                             hover:bg-red-50 hover:border-red-300
+                                             rounded-lg transition-colors"
+                                >
+                                    <XCircle className="w-3 h-3" />
+                                    Reject
+                                </button>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); onApprove?.(); }}
+                                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold 
+                                             text-white bg-emerald-600 hover:bg-emerald-700 
+                                             rounded-lg transition-colors"
+                                >
+                                    <Check className="w-3 h-3" />
+                                    Approve
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
-            {expanded && (
-                <pre className="mt-2 p-3 bg-gray-50 rounded-lg text-xs text-gray-700 font-mono overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap border border-gray-100">
-                    {message.content}
-                </pre>
-            )}
         </div>
     );
 }

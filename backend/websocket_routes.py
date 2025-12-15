@@ -7,6 +7,7 @@ Delegates to:
 - node_handlers.py for graph node event processing
 """
 
+from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from backend.graph import graph
 from backend.events import EventEmitter, set_emitter, EventType
@@ -22,7 +23,8 @@ from backend.persistence import (
     save_artifact,
     save_agent_memory,
     update_session_title,
-    append_to_chat_history
+    append_to_chat_history,
+    set_hitl_pending
 )
 from backend.node_handlers import (
     handle_router,
@@ -99,6 +101,42 @@ async def websocket_endpoint(
                 if feedback:
                     print(f"   Feedback: {feedback[:100]}..." if len(feedback) > 100 else f"   Feedback: {feedback}")
                 
+                # PERSISTENCE: Save the decision/feedback to chat history
+                if decision == "revised" and feedback:
+                    # Save user's revision request as a user message
+                    await append_to_chat_history(
+                        session_id=current_session_id,
+                        workflow_run_id=workflow_run_id,
+                        item_type="message",
+                        role="user",
+                        content=feedback
+                    )
+                    # Also send to WebSocket so frontend can display immediately
+                    await websocket.send_json({
+                        "type": "user_message",
+                        "content": feedback,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                elif decision == "approved":
+                    await append_to_chat_history(
+                        session_id=current_session_id,
+                        workflow_run_id=workflow_run_id,
+                        item_type="log",
+                        role="system",
+                        content="Plan approved by user"
+                    )
+                elif decision == "rejected":
+                    await append_to_chat_history(
+                        session_id=current_session_id,
+                        workflow_run_id=workflow_run_id,
+                        item_type="log",
+                        role="system",
+                        content="Plan rejected by user"
+                    )
+                
+                # Clear HITL pending state
+                await set_hitl_pending(workflow_run_id, pending=False)
+                
                 # Create event emitter for resume
                 emitter = EventEmitter()
                 emitter.initialize(asyncio.get_running_loop())
@@ -140,31 +178,150 @@ async def websocket_endpoint(
                                         state_update, current_session_id, workflow_run_id
                                     )
                     finally:
-                        status = "completed" if decision == "approved" else (
-                            "revision_requested" if decision == "revised" else "rejected"
-                        )
-                        await update_workflow_run(workflow_run_id, status=status)
-                        emitter.emit_done()
+                        # Check if the graph is truly completed or just interrupted again
+                        # (e.g., if user requested revision and planner paused for approval again)
+                        try:
+                            state = await graph.aget_state(thread_config)
+                            is_done = not bool(state.next)
+                        except Exception:
+                            # Fallback if aget_state fails
+                            is_done = True
+                            
+                        if is_done:
+                            status = "completed" if decision == "approved" else (
+                                "revision_requested" if decision == "revised" else "rejected"
+                            )
+                            await update_workflow_run(workflow_run_id, status=status)
+                            emitter.emit_done()
+                        else:
+                            # Interrupted again - do not emit done
+                            pass
                 
                 async def stream_resumed_events():
+                    import threading
+                    print(f"DTO DEBUG: Stream Consumer running in Thread: {threading.get_ident()}")
+                    print(f"DTO DEBUG: Stream Consumer Emitter ID: {id(emitter)}")
                     try:
                         while True:
                             event = await asyncio.wait_for(emitter.get(), timeout=120)
                             if event.type == EventType.STATUS and event.content == "__DONE__":
                                 break
                             
-                            # Send events to frontend (simplified for resume)
-                            should_send = event.type not in [
-                                EventType.MESSAGE, EventType.THOUGHT
-                            ]
-                            if should_send:
+                            print(f"DTO DEBUG: CONSUMER RECEIVED EVENT: {event.type} from {event.agent}")
+                            
+                            # PERSISTENCE: Save events to database (same as main loop)
+                            if event.type == EventType.AGENT_MEMORY:
+                                await save_agent_memory(
+                                    workflow_run_id=workflow_run_id,
+                                    agent_name=event.agent,
+                                    messages=event.messages or [],
+                                    scratchpad=event.scratchpad or ""
+                                )
+                            
+                            if event.type == EventType.ARTIFACT:
+                                await save_artifact(
+                                    workflow_run_id=workflow_run_id,
+                                    session_id=current_session_id,
+                                    agent_name=event.agent,
+                                    artifact_type=event.artifact_type or "unknown",
+                                    title=event.artifact_title or "Untitled",
+                                    content=event.content
+                                )
+                        
+                            
+                            # HITL: Persist pending approval state (handling revision loops)
+                            if event.type == EventType.PLAN_PENDING_APPROVAL:
+                                # When decision is "approved", this event is spuriously emitted
+                                # because the node function re-runs on resume. Skip it and continue.
+                                if decision == "approved":
+                                    continue  # Skip this spurious event, keep consuming
+                                
+                                # For "revised" - this is a new plan needing approval
+                                await set_hitl_pending(
+                                    workflow_run_id=workflow_run_id,
+                                    pending=True,
+                                    plan_json=event.content
+                                )
+                                # Save log message
+                                await append_to_chat_history(
+                                    session_id=current_session_id,
+                                    workflow_run_id=workflow_run_id,
+                                    item_type="log",
+                                    role="system",
+                                    content="Revised plan ready for review. Waiting for user approval."
+                                )
+                                
+                                # CRITICAL: Send to WebSocket so frontend shows UI immediately!
                                 await websocket.send_json(event.to_dict())
+
+                                break # Graceful exit for HITL (only when waiting for new approval)
+                            
+                            # Chat history persistence
+                            should_save_to_history = event.type not in [
+                                EventType.THOUGHT_CHUNK,
+                                EventType.MESSAGE_CHUNK,
+                                EventType.MESSAGE_END,
+                                EventType.AGENT_MEMORY,
+                                EventType.STATUS,
+                                EventType.REFLECTION_STATUS,
+                                EventType.TOOL_CALL
+                            ]
+                            
+                            if should_save_to_history:
+                                item_type = event.type.value
+                                
+                                if event.type == EventType.MESSAGE:
+                                    role = "assistant"
+                                elif event.type in [
+                                    EventType.THOUGHT, EventType.TOOL_RESULT,
+                                    EventType.AGENT_START, EventType.ARTIFACT,
+                                    EventType.CRITIQUE_DOCUMENT, EventType.DRAFT_UPDATED
+                                ]:
+                                    role = "agent"
+                                else:
+                                    role = "system"
+                                
+                                await append_to_chat_history(
+                                    session_id=current_session_id,
+                                    workflow_run_id=workflow_run_id,
+                                    item_type=item_type,
+                                    role=role,
+                                    content=event.content,
+                                    agent_name=event.agent,
+                                    tool_name=event.tool_name,
+                                    tool_args=event.tool_args,
+                                    tool_output=event.tool_output,
+                                    artifact_type=event.artifact_type,
+                                    artifact_title=event.artifact_title,
+                                    iteration=event.iteration,
+                                    version=event.version
+                                )
+                            
+                            # Send to frontend (exclude MESSAGE and THOUGHT - they're for persistence only)
+                            # Real-time display uses chunks (MESSAGE_CHUNK, THOUGHT_CHUNK)
+                            should_send_to_websocket = event.type not in [
+                                EventType.MESSAGE,
+                                EventType.THOUGHT
+                            ]
+                            
+                            if should_send_to_websocket:
+                                await websocket.send_json(event.to_dict())
+                            
                     except asyncio.TimeoutError:
                         print("Resume stream timeout")
                     except Exception as e:
                         print(f"Resume streaming error: {e}")
                 
-                await asyncio.gather(run_resumed_graph(), stream_resumed_events())
+                # Ensure consumer starts by creating task explicitly
+                consumer_task = asyncio.create_task(stream_resumed_events())
+                # Yield to let it start
+                await asyncio.sleep(0.1)
+                
+                try:
+                     await run_resumed_graph()
+                finally:
+                     # Wait for consumer to finish (it waits for DONE signal)
+                     await consumer_task
                 continue  # Go back to waiting for next message
             
             # Create workflow run
@@ -244,14 +401,21 @@ async def websocket_endpoint(
                                     workflow_run_id, websocket
                                 )
                 finally:
-                    await update_workflow_run(
-                        workflow_run_id,
-                        status="completed",
-                        final_route=final_route,
-                        reflection_iterations=reflection_iterations,
-                        is_approved=is_approved
-                    )
-                    emitter.emit_done()
+                    # Update workflow run status if complete
+                    if final_route: # Only if we completed execution (not interrupted)
+                        await update_workflow_run(
+                            workflow_run_id,
+                            status="completed",
+                            final_route=final_route,
+                            reflection_iterations=reflection_iterations,
+                            is_approved=is_approved
+                        )
+                        emitter.emit_done()
+                    else:
+                        # Interrupted for HITL - DO NOT emit done!
+                        # The graph is just paused. If we emit done, the event stream loop exits
+                        # and pending events in the queue won't be processed/saved.
+                        pass
             
             async def stream_events():
                 try:
@@ -291,6 +455,30 @@ async def websocket_endpoint(
                                 title=event.artifact_title or "Untitled",
                                 content=event.content
                             )
+                        
+                            # HITL: Persist pending approval state
+                        if event.type == EventType.PLAN_PENDING_APPROVAL:
+                            await set_hitl_pending(
+                                workflow_run_id=workflow_run_id,
+                                pending=True,
+                                plan_json=event.content  # The plan JSON
+                            )
+                            
+                            # Save this event to chat history so it appears in the log
+                            await append_to_chat_history(
+                                session_id=current_session_id,
+                                workflow_run_id=workflow_run_id,
+                                item_type="log",
+                                role="system",
+                                content="Plan ready for review. Waiting for user approval."
+                            )
+
+                            # CRITICAL: Send to WebSocket so frontend shows UI immediately!
+                            # We break the loop below, so the normal "should_send_to_websocket" logic is skipped.
+                            await websocket.send_json(event.to_dict())
+                            
+                            # CRITICAL: Break the stream loop here!
+                            break
                         
                         # Chat history persistence
                         chat_history_id = None

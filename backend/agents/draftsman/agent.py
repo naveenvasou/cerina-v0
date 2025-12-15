@@ -98,6 +98,7 @@ class DraftsmanAgent:
         """Emit event if emitter is available."""
         emitter = get_emitter()
         if emitter:
+            # print(f"DEBUG: Emitting {event_type} - Emitter valid")
             if event_type == "thought":
                 emitter.emit_thought("draftsman", kwargs.get("content", ""))
             elif event_type == "thought_chunk":
@@ -125,6 +126,9 @@ class DraftsmanAgent:
                 )
             elif event_type == "agent_start":
                 emitter.emit_agent_start("Draftsman Agent", kwargs.get("content", ""))
+        else:
+            import threading
+            print(f"CRITICAL: Draftsman emit failed - Emitter is None for event {event_type} (thread: {threading.get_ident()})")
     
     def _format_protocol_contract_md(self, contract: dict) -> str:
         """Format ProtocolContract as readable Markdown."""
@@ -207,7 +211,8 @@ class DraftsmanAgent:
         Uses streaming to emit thinking/text chunks in real-time.
         NO writing, only constraint extraction.
         """
-        
+        import threading
+        print(f"DEBUG: Protocol Decomposition running in Thread: {threading.get_ident()}")
         
         planner_output = state["planner_output"]
         
@@ -757,10 +762,10 @@ class DraftsmanAgent:
             - 'draft_versions' (list) - Initial version history
         """
         from datetime import datetime
-        
+        print("EMITTING AGENT START EVENT FOR DRAFTSMAN")
         # Emit agent_start event
         self._emit("agent_start", content="Starting deterministic CBT exercise drafting...")
-        
+        print("EMITTED AGENT START EVENT FOR DRAFTSMAN")
         plan_str = state.get('plan', '{}')
         
         # Parse plan JSON

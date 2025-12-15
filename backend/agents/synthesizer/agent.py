@@ -204,6 +204,9 @@ class PresentationSynthesizerAgent:
         # Emit completion message
         self._emit("message_chunk", content=f"✅ **Final Presentation Ready**\n\nYour {exercise_type} has been synthesized and is ready for use.")
         self._emit("message_end")
+        
+        # Emit final message for persistence to ChatHistory
+        self._emit("message", content=final_presentation)
 
         # Emit the final artifact
         self._emit(
