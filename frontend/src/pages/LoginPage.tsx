@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     signInWithPopup,
@@ -10,11 +11,23 @@ import { auth } from '../lib/firebase';
 import { Loader2, Mail, Lock, ArrowRight } from 'lucide-react';
 
 export default function LoginPage() {
+    const navigate = useNavigate();
     const [isLogin, setIsLogin] = useState(true);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+
+    React.useEffect(() => {
+        const unsubscribe = auth.onAuthStateChanged((user) => {
+            if (user) {
+                // User is signed in, redirect to home
+                navigate('/'); // or '/home' or wherever your main page is
+            }
+        });
+
+        return () => unsubscribe();
+    }, [navigate]);
 
     const handleGoogleLogin = async () => {
         try {
