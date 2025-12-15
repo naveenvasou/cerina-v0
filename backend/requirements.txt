@@ -1,0 +1,17 @@
+langgraph
+langchain
+langchain-core
+langchain-openai
+langchain-google-genai
+langchain-community
+python-dotenv
+fastapi
+uvicorn
+pydantic
+tavily-python
+
+# Database
+sqlmodel>=0.0.14
+asyncpg>=0.29.0
+langgraph-checkpoint-postgres>=1.0.0
+psycopg[binary,pool]>=3.1.0
